@@ -26,12 +26,12 @@ import scipy.sparse as sp
 import jax.numpy as jnp
 from jax import jit, lax, vmap
 from functools import partial
+import gc
 
 
 import jax
-jax.config.update("jax_enable_x64", False)
-
-# import gstools as gs
+from .covariance_model import spdeAppoxCov
+from .filter_jax import filter_smw_nan, smoother_smw, computeExpectedValues
 
 
 # %% key stream
@@ -638,20 +638,20 @@ def E_step(y_t, R, F, H, Q, est_x0, est_Sigma0, Xbeta, est_beta):
 
     # python
     tStart = time.time()
-    x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL = filterjax.filter_smw_nan(
+    x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL = filter_smw_nan(
         y_t, R, F, H, Q, est_x0, est_Sigma0, Xbeta, est_beta)
     jax.block_until_ready(x_t)
     tdelta_kf = time.time() - tStart
 
     tStart = time.time()
-    x_T, P_T, P_T_1 = filterjax.smoother_smw(
+    x_T, P_T, P_T_1 = smoother_smw(
         H, F, x_t, P_t, K, x_t_1, P_t_1, invP_t_1)
     jax.block_until_ready(x_T)
     tdelta_sm = time.time() - tStart
 
     # Output Eq: (7a, 7b, 7c, 7d, 7e)
     tStart = time.time()
-    y_hat, S11, S10, S00 = filterjax.computeExpectedValues(
+    y_hat, S11, S10, S00 = computeExpectedValues(
         y_t, x_T, P_T, P_T_1, R, H, Xbeta, est_beta)
     jax.block_until_ready(y_hat)
     tdelta_exp = time.time() - tStart
