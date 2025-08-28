@@ -7,8 +7,7 @@ Created on Fri June 30, 2025
 @title : LSSM simulation v4 (fix those border effects by enlarging the latent dimension during the M-step)
 """
 
-import filter_jax as filterjax
-from spatial import spdeAppoxCov
+from utils import task
 import os
 import sys
 import pickle
@@ -28,19 +27,8 @@ from joblib import Parallel, delayed
 # Update JAX config
 jax.config.update("jax_enable_x64", False)
 
-# Environment-specific paths
-if os.cpu_count() == 8:
-    geopydir = '/home/jacopo/Documents/Dottorato/geopy/geopy'
-    filterdir = '/home/jacopo/Documents/Dottorato/geopy/geopy/filter_py/'
-else:
-    geopydir = '/home/jrodeschini/geopy'
-    filterdir = '/home/jrodeschini/geopy/filter_py'
 
-sys.path.insert(0, geopydir)
-sys.path.insert(0, filterdir)
-
-
-# Assuming task is defined at bottom of file or in filter_jax
+# %%  key stream
 
 
 class KeyStream:
@@ -55,6 +43,8 @@ class KeyStream:
             keys = random.split(self._key, num=num + 1)
             self._key = keys[-1]
             return keys[:-1]
+
+# %% Simulation section
 
 
 def run_simulation():
