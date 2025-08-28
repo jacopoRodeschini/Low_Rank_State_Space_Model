@@ -47,6 +47,21 @@ conda activate dev
 python main.py
 ```
 
+## Run the case study application (AQCLIM_GRINS Dataset)
+
+1. **Download the dataset** (.rda) from the Zenodo repository (https://zenodo.org/records/15699806/files/GRINS_AQCLIM_points_Italy.rda?download=1)
+
+2. **Run the create_csv.R** script to create a .csv version of the dataset  
+
+```bash
+R create_csv.R
+```
+
+3. **Run the case_study.py** to reproduce the case study application
+```bash
+python case_study.py
+```
+
 ---
 
 ## System Information
