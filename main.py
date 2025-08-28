@@ -20,13 +20,6 @@ import jax.numpy as jnp
 from jax import random
 from joblib import Parallel, delayed
 
-# Remove unused imports:
-# import traceback, subprocess, pandas as pd, matplotlib, mpl_toolkits, etc.
-# Only keep what's necessary in this script.
-
-# Update JAX config
-jax.config.update("jax_enable_x64", False)
-
 
 # %%  key stream
 
@@ -86,7 +79,7 @@ def run_simulation():
                               tol_relat=1e-6, verbose=False, same=True, regular=True, estimates=False)
                 for key in keys_for_pool)
 
-            filename = f'/home/jrodeschini/geopy_casestudy/geopy_grins/output/JAX_LSSMsim_v4_{t}_{m[0]}_{int(l*100)}_v3.pkl'
+            filename = f'./output/JAX_LSSMsim_v4_{t}_{m[0]}_{int(l*100)}.pkl'
             with open(filename, 'wb') as f:
                 pickle.dump(results_list, f)
 
@@ -96,4 +89,5 @@ def run_simulation():
 
 
 if __name__ == "__main__":
+    print("Run the main simulation script")
     run_simulation()
