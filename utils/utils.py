@@ -6,7 +6,6 @@ Created on Fri June 30, 2025
 @author: jacopo
 """
 
-import filter_jax
 import sys
 import os
 import pickle
