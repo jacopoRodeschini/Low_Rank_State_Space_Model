@@ -9,13 +9,18 @@ This paper proposes a novel low-rank approximation to the multivariate State-Spa
 
 ## Contents
 
-* **`main.py`**: Script that runs the simulation to confirm theoretical findings. The simulation results are saved in the `output/` folder.
 
-* **`summarise_results.py`**: Script to organize the simulation results into pandas DataFrames for analysis.
+* **`main.py`**: Runs the simulation to confirm theoretical findings. Results are saved in the `output/` folder.  
 
-* **`utils/`**: Module containing useful functions.
+* **`case_study.py`**: Runs the case study application.  
 
-* **`output/`**: Folder where simulation results are stored.
+* **`utils/`**: Module containing utility functions.  
+
+* **`output/`**: Stores simulation results.  
+
+* **`shapefile/`**: Folder with the Italian shapefile required for the case study.  
+
+* **`environment.txt`**: List of Python packages required to create the conda environment.  
 
 
 
@@ -51,6 +56,11 @@ python main.py
 
 1. **Extract the dataset** (`.csv`) from empirical_application.zip. It comes from the Zenodo repository: [GRINS_AQCLIM_points_Italy.rda](https://zenodo.org/records/15699806/files/GRINS_AQCLIM_points_Italy.rda?download=1). 
 
+2. **Activate the environment**:
+
+```bash
+conda activate dev
+```
 
 3. **Run the case study** using the Python script. The script requires the **low-rank parameter** as a command-line argument (e.g., `0.75`):
 
