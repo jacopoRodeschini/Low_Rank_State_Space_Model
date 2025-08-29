@@ -54,7 +54,7 @@ python main.py
 
 ## Run the Case Study Application (AQCLIM_GRINS Dataset)
 
-1. **Extract the dataset** (`.csv`) from empirical_application.zip. It comes from the Zenodo repository: [GRINS_AQCLIM_points_Italy.rda](https://zenodo.org/records/15699806/files/GRINS_AQCLIM_points_Italy.rda?download=1). 
+1. **Extract the dataset** (`.csv`) from empirical_application.zip under the ./output folder. It comes from the Zenodo repository: [GRINS_AQCLIM_points_Italy.rda](https://zenodo.org/records/15699806/files/GRINS_AQCLIM_points_Italy.rda?download=1). 
 
 2. **Activate the environment**:
 
