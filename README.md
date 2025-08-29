@@ -62,7 +62,7 @@ python case_study.py 0.75
 
 ## System Information
 
-The computation time reported in the paper was recorded using Python 3.10.15 on a machine equipped with an **Intel(R) Xeon(R) Platinum 8460Y+** CPU and **1007 GB RAM**.
+The computation time reported in the paper was recorded using Python 3.10.15 on a machine equipped with two **Intel(R) Xeon(R) Platinum 8460Y+** CPUs and **1007 GB RAM**.
 
 ---
 
