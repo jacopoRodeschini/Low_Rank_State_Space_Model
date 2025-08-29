@@ -1562,7 +1562,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Run case study with a parameter.")
     parser.add_argument("lowrank", type=float,
-                        help="Lowrank parameter hat to pass to run_case_study")
+                        help="The Low Rank parameter has to be passed to run the case study")
     args = parser.parse_args()
     lowrank = args.lowrank
 
