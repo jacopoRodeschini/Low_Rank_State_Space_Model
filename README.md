@@ -49,14 +49,8 @@ python main.py
 
 ## Run the Case Study Application (AQCLIM_GRINS Dataset)
 
-1. **Download the dataset** (`.rda`) from the Zenodo repository:
-   [GRINS_AQCLIM_points_Italy.rda](https://zenodo.org/records/15699806/files/GRINS_AQCLIM_points_Italy.rda?download=1)
+1. **Extract the dataset** (`.csv`) from empirical_application.zip. It comes from the Zenodo repository: [GRINS_AQCLIM_points_Italy.rda](https://zenodo.org/records/15699806/files/GRINS_AQCLIM_points_Italy.rda?download=1). 
 
-2. **Convert the dataset to CSV** by running the R script:
-
-```bash
-Rscript create_csv.R
-```
 
 3. **Run the case study** using the Python script. The script requires the **low-rank parameter** as a command-line argument (e.g., `0.75`):
 
