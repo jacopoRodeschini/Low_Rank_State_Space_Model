@@ -43,7 +43,7 @@ cd Low_Rank_State_Space_Model
 3. **Create the Conda environment** (named `dev`) from the list of required packages:
 
 ```bash
-conda env create -f environment.yml --name dev
+conda env create --file=environment.yml --name dev
 ```
 
 4. **Activate the environment**:
