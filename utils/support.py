@@ -10,7 +10,7 @@ import sys
 import os
 import pickle
 from scipy.spatial import ConvexHull
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import LineString, Point, Polygon, MultiPolygon
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.spatial import Delaunay
 from scipy.spatial.distance import cdist
@@ -30,8 +30,10 @@ import gc
 
 
 import jax
-from .covariance_model import spdeAppoxCov
+from .covariance_model_legacy import spdeAppoxCov
 from .filter_jax import filter_smw_nan, smoother_smw, computeExpectedValues
+from scipy.linalg import block_diag as scyp_block_diag
+from .grid import grid
 
 
 # %% key stream
@@ -56,11 +58,11 @@ class KeyStream:
 
         return new_key
 
-# %% joblib task [estimation]
+# %% [Utils] Joblib task - Estimation
 
 
-def task(seed, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent, max_iter=100, tol_relat=1e-6, same=True,
-         regular=True, lowrank=1, angle_thr=2, verbose=True, estimates=False):
+def task(seed, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent, max_iter=100, tol_relat=1e-6,
+         lowrank=1, verbose=True, estimates=False, regular=False):
 
     try:
 
@@ -83,8 +85,16 @@ def task(seed, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent, max_ite
         nvar = len(s2error)
         nlat = len(flatent)
 
+        boundary_polygon = [
+            Polygon([(0, 0), (d, 0), (d, d), (0, d)]) for d in domain]
+
         y_true, x_true, Xbeta, points, index_train, block_p, pdim = buildDataset(
-            keys, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent, regular=True)
+            keys, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent)
+
+        # add noise covariates [to check the std]
+        # temp = jax.random.normal(keys.next(), shape=(
+        #     Xbeta.shape[0], 1, Xbeta.shape[2]))
+        # Xbeta = jnp.hstack((Xbeta, temp))
 
         # Training points
         m_points = [pt[inx, :] for pt, inx in zip(points, index_train)]
@@ -93,60 +103,93 @@ def task(seed, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent, max_ite
         max_vertices = [int(np.ceil(lowrank * len(pt)))
                         for pt in m_points]  # observed
 
+        if not regular:
+            vertex = m_points
+        else:
+            vertex = []
+            for i in range(nlat):
+                v = jnp.linspace(
+                    start=0, stop=domain[i], num=int(jnp.sqrt(max_vertices[i])), dtype=jnp.float32)
+                gridx, gridy = jnp.meshgrid(v, v)
+                vertex.append(jnp.vstack(
+                    (gridx.flatten(), gridy.flatten())).T)  # Mesh vertex grid
+
         # Boundary polygon
-        hull = [ConvexHull(pt) for pt in m_points]
-        boundary_polygon = [Polygon(h.points[h.vertices])
-                            for h in hull]  # .buffer(0.01)
-        boundary_vertices = [h.vertices for h in hull]
+        hull = boundary_polygon
 
         # Compute the outer points
         delta = 0.5
-        x = [jnp.linspace(start=h.min_bound[0]-delta,
-                          stop=h.max_bound[0]+delta, num=15) for h in hull]
-        y = [jnp.linspace(start=h.min_bound[1]-delta,
-                          stop=h.max_bound[1]+delta, num=15) for h in hull]
+        deep = 2
+        x = [np.linspace(start=h.bounds[0]-deep*delta,
+                         stop=h.bounds[2]+deep*delta, num=15) for h in hull]
+        y = [np.linspace(start=h.bounds[1]-deep*delta,
+                         stop=h.bounds[3]+deep*delta, num=15) for h in hull]
 
         outer_grid = [jnp.meshgrid(xi, yi) for xi, yi in zip(x, y)]
 
-        outer_points = [jnp.vstack(
+        outer_vertex = [jnp.vstack(
             (gr[0].flatten(), gr[1].flatten())).T for gr in outer_grid]  # Mesh vertex grid
 
         # remove the outer point within the polygon
         index = [bd_poly.contains([Point(p) for p in ot_points])
-                 for bd_poly, ot_points in zip(boundary_polygon, outer_points)]
-        outer_points = [ou_points[~inx]
-                        for ou_points, inx in zip(outer_points, index)]
+                 for bd_poly, ot_points in zip(boundary_polygon, outer_vertex)]
+        outer_vertex = [ou_points[~inx]
+                        for ou_points, inx in zip(outer_vertex, index)]
 
         # compute the all_points (the inner points index and the boundary coordinates)
-        all_points = [jnp.vstack((vertex, ou_points))
-                      for vertex, ou_points in zip(m_points, outer_points)]
+        all_vertex = [jnp.vstack((vertex, ou_points))
+                      for vertex, ou_points in zip(vertex, outer_vertex)]
 
         # Reduce the vertex count and compute a valid delanuay
         delaunay = [reduce_vertex_count_hard(
-            all_pt, bd_poly, m_v) for all_pt, bd_poly, m_v in zip(all_points, boundary_polygon, max_vertices)]
+            all_pt, bd_poly, m_v) for all_pt, bd_poly, m_v in zip(all_vertex, boundary_polygon, max_vertices)]
 
         min_angle = [np.round(np.min([np.min(compute_angles(d.points, t))
                                      for t in d.simplices]), 2) for d in delaunay]
 
+        # fig, ax = plt.subplots(1, len(delaunay))
+        # for axi, bd_poly, t_pt, o_pt, vt, tri in zip(ax, boundary_polygon, points, m_points, vertex, delaunay):
+        #     x, y = bd_poly.boundary.xy  # Get x and y coordinates
+        #     axi.plot(x, y, color='blue', label='Convex hull')
+        #     axi.plot(vt[:, 0], vt[:, 1], 'x', color='m', label='Convex hull')
+        #     # axi.plot(t_pt[:, 0], t_pt[:, 1], 'o', alpha=0.5, color='orange')
+        #     axi.plot(o_pt[:, 0], o_pt[:, 1], 's', alpha=0.5, color='black')
+        #     # axi.triplot(tri.points[:, 0], tri.points[:, 1], tri.simplices)
+
         # low-rank fcov
         sm_points = []  # smoothed points
         fcov = []      # Covariance functions
+        angle_thr = 5
         for i in range(len(delaunay)-1):
 
-            if lowrank < 1:
-                new_points, min_angle = laplacian_smoothing(
-                    delaunay[i], boundary_polygon[i], max_iterations=10, angle_thr=30, verbose=verbose)
+            if min_angle[i] < angle_thr:
+                new_points, min_angle[i] = laplacian_smoothing(
+                    delaunay[i], boundary_polygon[i], max_iterations=10, angle_thr=angle_thr, verbose=verbose)
             else:
                 new_points = delaunay[i].points
 
             # build the covariance mesh
+            sm_points.append(new_points)
             inner = isinner(boundary_polygon[i], new_points)
 
             temp = spdeAppoxCov(new_points, delaunay[i].simplices, outer_index=~inner, add_boundary=True,
                                 latlon=False, uniformRef=False, rescale=10)
 
+            # temp = spdeAppoxCov(new_points[inner], add_boundary=False,
+            #                     latlon=False, uniformRef=False, rescale=10)
+
             fcov.append(temp)
 
+        # plot
+        # fig, ax = plt.subplots(1, len(delaunay))
+        # for axi, bd_poly, mesh, t_pt, o_pt in zip(ax, boundary_polygon, fcov, points, m_points):
+        #     mesh.plot_mesh(ax=axi)
+        #     x, y = bd_poly.boundary.xy  # Get x and y coordinates
+        #     axi.plot(x, y, color='blue', label='Convex hull')
+        #     # axi.plot(t_pt[:, 0], t_pt[:, 1], 'o', alpha=0.5, color='orange')
+        #     axi.plot(o_pt[:, 0], o_pt[:, 1], 's', alpha=0.5, color='black')
+
+        # update the values
         # get the test index
         index_test = [np.arange(pdim[i])[~np.isin(
             np.arange(pdim[i]), index_train[i])] for i in range(nvar)]
@@ -168,7 +211,7 @@ def task(seed, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent, max_ite
         block_q_train = jnp.hstack((0, jnp.cumsum(qdim_train)))
 
         # ---- 4: Estimate
-        beta0 = jax.random.uniform(keys.next(), shape=beta.shape)
+        beta0 = jax.random.uniform(keys.next(), shape=(Xbeta_train.shape[1],))
         s2e0 = jax.random.uniform(
             keys.next(), shape=s2error.shape, minval=0.1, maxval=2)
         f0 = jnp.sort(jax.random.uniform(
@@ -179,10 +222,11 @@ def task(seed, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent, max_ite
             keys.next(), shape=A.shape, minval=0.2, maxval=2)
         ks0 = jnp.sort(jnp.sqrt(8)*jax.random.uniform(keys.next(),
                        shape=ks.shape, minval=1, maxval=7))[::-1]
+
         x0 = jax.random.uniform(keys.next(), minval=0,
                                 maxval=1, shape=(block_q_train[-1],))
 
-        est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_covList, est_A, nstat, y_hat, x_T, P_T = fit(
+        est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_covList, est_A, nstat, y_hat, x_T, P_T, P_T_1, S11, S10, S00 = fit(
             y_train, fcov, block_p_train, pdim_train, Xbeta_train, m_points, max_iter=max_iter, tol_par=1e-3, tol_relat=tol_relat, nstat=[],
             beta0=beta0, s2e0=s2e0, f0=f0, A0=A0, ks0=ks, x0=x0, Sigma0=None, verbose=verbose)
 
@@ -205,18 +249,19 @@ def task(seed, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent, max_ite
         niter = nstat[-1]['niter']
         res = nstat[-1]
         res['seed'] = seed
+        res['min_angle'] = min_angle
         res['lowrank'] = lowrank
         res['m'] = mtrain
         res['T_lenght'] = T
         res['domain'] = domain
-        res['regolar'] = regular
+        res['regular'] = True
         res['time_tot'] = time_tot
         res['rmse_train'] = rmse_train
         res['rmse_test'] = rmse_test
 
         gc.collect()  # Help free memory
         if estimates:
-            return res, points, pdim, qdim, y_train, Xbeta_train, est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_covList, est_A, nstat, y_hat, x_T, P_T
+            return res, points, m_points, pdim_train, qdim_train, y_train, Xbeta_train, est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_covList, est_A, nstat, y_hat, x_T, P_T, P_T_1, S11, S10, S00
         else:
             return res
 
@@ -226,8 +271,8 @@ def task(seed, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent, max_ite
         # If anything crashes, this block will catch it.
         return None
 
-# %% Build dataset
 
+# %% [Utils] Build univariate dataset function
 
 def predict(H, x_T, P_T=None, Xbeta=None, beta=None):
     p, q = H.shape
@@ -255,7 +300,7 @@ def predict(H, x_T, P_T=None, Xbeta=None, beta=None):
         return y_hat
 
 
-def buildDataset(keys, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent, regular=True):
+def buildDataset(keys, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent):
 
     if any(mtotal < mtrain):
         print("m total should be >= m train")
@@ -264,20 +309,15 @@ def buildDataset(keys, domain, mtotal, mtrain, A, ks, beta, T, s2error, flatent,
     nvar = len(domain)
     nlat = len(ks)
 
-    # m total random points
+    # m total random points (training)
     points = []
 
     for i in range(nvar):
-        if regular:
-            v = jnp.linspace(
-                start=0, stop=domain[i], num=mtotal[i], dtype=jnp.float32)
-            gridx, gridy = jnp.meshgrid(v, v)
-            points.append(jnp.vstack(
-                (gridx.flatten(), gridy.flatten())).T)  # Mesh vertex grid
-        else:
-
-            points = jnp.random.uniform(
-                0, domain[0], (mtotal[0]**2, 2), key=keys.next(), dtype=jnp.float32)
+        v = jnp.linspace(
+            start=0, stop=domain[i], num=mtotal[i], dtype=jnp.float32)
+        gridx, gridy = jnp.meshgrid(v, v)
+        points.append(jnp.vstack(
+            (gridx.flatten(), gridy.flatten())).T)  # Mesh vertex grid
 
     # Get the (random) traininig index
     index_train = []
@@ -444,7 +484,7 @@ def block_diag_3D(blocks):
 
     return out
 
-# %% fit
+# %% [Utils] Fit
 
 
 def fit(y_t, est_covList, block_p, pdim, Xbeta, points, beta0=None, s2e0=None,
@@ -547,10 +587,23 @@ def fit(y_t, est_covList, block_p, pdim, Xbeta, points, beta0=None, s2e0=None,
 
         # Depend by the model (precision matrix) [Sigma = dense matrix]
         # 1) the ks is update by the previous itration
-        # 2) the Q is built considering the boudary [and cut later on the inner points only]
+        # 2) the Q is built considering the boudary
 
-        invQ = [jnp.asarray(fcov.precision()[:fcov.n_inner_points, :fcov.n_inner_points].toarray(), dtype=jnp.float32)
-                for fcov in est_covList]
+        invQ = []
+        for fcov in est_covList:
+            invQi = fcov.precision()
+
+            inx = fcov.n_inner_points
+            Q_11 = invQi[:inx, :][:, :inx]
+            Q_12 = invQi[:inx, :][:, inx:]
+            Q_22 = invQi[inx:, :][:, inx:]
+
+            # Covarianza marginale
+            Q_mar = Q_11 - Q_12 @ np.linalg.inv(Q_22.toarray()) @ Q_12.T
+            # Sigma_mar = np.linalg.inv(Q_mar)
+            invQ.append(Q_mar)
+
+        # compute the sigma
 
         Q = block_diag(
             *[jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=jnp.float32)) for mt in invQ])
@@ -604,10 +657,14 @@ def fit(y_t, est_covList, block_p, pdim, Xbeta, points, beta0=None, s2e0=None,
         tdelta_iter = time.time() - tStart_iter
 
         if verbose:
-            temp = f'''iter:{niter}, logl: {jnp.round(logL_cur,2)}, deltL: {jnp.round(delta_lik,2)}, relatL: {jnp.round(relat_lik,5)}
-beta:{np.round(update_beta,2)},s2e:{jnp.round(update_s2e,2)}, f:{jnp.round(update_f,2)},rescale:{jnp.round(update_ks,2)},
-A:{est_A.flatten()}, x0={jnp.round(est_x0.mean(),2)}, S0 = {np.round(jnp.diag(est_Sigma0).mean(),2)}'''
-            print(temp)
+            #             temp = f'''iter:{niter}, logl: {jnp.round(logL_cur,2)}, deltL: {jnp.round(delta_lik,2)}, relatL: {jnp.round(relat_lik,5)}
+            # beta:{np.round(update_beta,2)},s2e:{jnp.round(update_s2e,2)}, f:{jnp.round(update_f,2)},rescale:{jnp.round(update_ks,2)},
+            # A:{est_A.flatten()}, x0={jnp.round(est_x0.mean(),2)}, S0 = {np.round(jnp.diag(est_Sigma0).mean(),2)}'''
+
+            msg = logger(niter, logL_cur, delta_lik, relat_lik, update_beta,
+                         update_s2e, update_f, update_ks, est_A, est_x0, est_Sigma0)
+
+            print(msg)
             print(tdelta_iter, tdelta_Edet.sum(), tdelta_Mdet.sum())
 
         if niter == max_iter or relat_lik <= tol_relat:  # or delta_par <= tol_par
@@ -629,9 +686,65 @@ A:{est_A.flatten()}, x0={jnp.round(est_x0.mean(),2)}, S0 = {np.round(jnp.diag(es
             nstat.append(it)
 
     gc.collect()
-    return est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_covList, est_A, nstat, y_hat, x_T, P_T
+    return est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_covList, est_A, nstat, y_hat, x_T, P_T, P_T_1, S11, S10, S00
 
-# %% E step
+
+def logger(
+        niter,
+        logL_cur,
+        delta_lik,
+        relat_lik,
+        update_beta,
+        update_s2e,
+        update_f,
+        update_ks,
+        est_A,
+        est_x0,
+        est_Sigma0,
+        beta_decimals=2,
+        scalar_decimals=2,
+        relat_decimals=5):
+    """
+    Nicely formatted iteration logger for optimization/Kalman filter loops.
+    """
+
+    # --- Identify and format scalars vs arrays ---
+    def format_value(x, decimals=2):
+        x_np = np.asarray(x)
+
+        # Scalar case
+        if x_np.ndim == 0:
+            return f"{float(x_np):.{decimals}f}"
+
+        # Array case → keep full array print
+        return np.array2string(
+            x_np,
+            precision=decimals,
+            separator=', ',
+            floatmode='fixed',
+            suppress_small=False
+        )
+
+    msg = f"""
+------------------------------------------------------------------
+Iteration : {niter}
+logL      : {format_value(logL_cur, scalar_decimals)}
+delta L   : {format_value(delta_lik, scalar_decimals)}
+relat L   : {format_value(relat_lik, relat_decimals)}
+beta      : {format_value(update_beta, beta_decimals)}
+s2e       : {format_value(update_s2e, scalar_decimals)}
+f param   : {format_value(update_f, scalar_decimals)}
+rescale   : {format_value(update_ks, scalar_decimals)}
+A (flat)  : {format_value(np.asarray(est_A).flatten(), scalar_decimals)}
+x0        : {format_value(est_x0.mean(), scalar_decimals)}
+S0 diag   : {format_value(jnp.diag(est_Sigma0).mean(), scalar_decimals)}
+------------------------------------------------------------------
+"""
+
+    return msg
+
+
+# %% [Utils] E step
 
 
 def E_step(y_t, R, F, H, Q, est_x0, est_Sigma0, Xbeta, est_beta):
@@ -659,7 +772,7 @@ def E_step(y_t, R, F, H, Q, est_x0, est_Sigma0, Xbeta, est_beta):
     tdelta = np.array([tdelta_kf, tdelta_sm, tdelta_exp], dtype=jnp.float32)
     return y_hat, x_t, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta
 
-# %% M step
+# %% [Utils] M step
 
 
 def M_step(y_t, y_hat, F, H, Xbeta, points, est_covList, block_p, block_q, x_T,
@@ -757,7 +870,7 @@ def M_step(y_t, y_hat, F, H, Xbeta, points, est_covList, block_p, block_q, x_T,
                        tdelta_ks, tdelta_A], dtype=jnp.float32)
     return beta, s2e, est_f, x0, Sigma0, est_covList, est_A, tdelta
 
-# %% [JAX] updating formula
+# %% [Utils] Updating formula, JAX (M-Step)
 
 
 @partial(jit, static_argnames=['b'])
@@ -926,7 +1039,8 @@ def compute_A2_jax(y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, nlat, T, 
             nna_mask = ~jnp.isnan(y_t_slice_full)
 
             # Get the full residual for the current block and time
-            residual_full_slice = residual[block_p[i]                                           :block_p[i+1], t]  # Shape (mdim_i,)
+            residual_full_slice = residual[block_p[i]
+                :block_p[i+1], t]  # Shape (mdim_i,)
 
             # Mask and pad residual_full_slice
             # Multiply by mask to zero out invalid entries, then pad to max_mdim_i
@@ -949,8 +1063,7 @@ def compute_A2_jax(y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, nlat, T, 
 
             for j in range(nlat):  # nlat is static
                 # Current block of Phi, shape (mdim_i, q_j_dim)
-                phi_block_current = Phi[block_p[i]
-                    :block_p[i+1], block_q[j]:block_q[j+1]]
+                phi_block_current = Phi[block_p[i]                                        :block_p[i+1], block_q[j]:block_q[j+1]]
 
                 # Apply mask by multiplying (zeros out rows corresponding to NaNs)
                 # nna_mask[:, jnp.newaxis] broadcasts the mask to all columns of phi_block_current
@@ -1044,22 +1157,37 @@ def ei_jax(i, dim):
 # Note: max_mdim_i is added back to static_argnames and function parameters
 
 
-# %% [Fully Scipy] Argmin problem
-
-# This new function encapsulates the part you want to run outside of JAX.
-
+# %% [Utils] Argmin problem, JAX  (M-step, rescale)
 
 def minf(params, est_covList, T, Omega):
     ks = np.exp(params)
 
     # Compute the precision and the logdetQ (sparse matrix)
-    invQ = [fcov.precision(rescale=ki)[:fcov.n_inner_points, :fcov.n_inner_points]
-            for fcov, ki in zip(est_covList, ks)]
+    # invQ = [fcov.precision(rescale=ki) ]
 
-    invQ = sp.block_diag(invQ, format='csc')  # csr
+    # fix the conditional precision matrix given the boundary
+    invQ = []
+    for fcov, ki in zip(est_covList, ks):
+
+        Q = fcov.precision(rescale=ki)
+
+        inx = fcov.n_inner_points
+        Q_11 = Q[:inx, :][:, :inx]
+        Q_12 = Q[:inx, :][:, inx:]
+        Q_22 = Q[inx:, :][:, inx:]
+
+        # Covarianza marginale
+        Q_mar = Q_11 - Q_12 @ np.linalg.inv(Q_22.toarray()) @ Q_12.T
+        # Sigma_mar = np.linalg.inv(Q_mar)
+
+        invQ.append(Q_mar)
+
+    # invQ = sp.block_diag(invQ) # sparse
+    invQ = scyp_block_diag(*invQ)
 
     # Compute the likelihood
-    logdet_invQ = logdetSparse(invQ)
+    # logdet_invQ = logdetSparse(invQ) # sparse computation
+    logdet_invQ = np.linalg.slogdet(invQ)[1]
 
     fun = -T * logdet_invQ + np.trace(invQ @ Omega)
     # print(ks, fun)
@@ -1081,7 +1209,7 @@ def logdetSparse(Q):
     return logdet
 
 
-# %% Get initial values
+# %% [Utils] Get initial values
 
 @partial(jax.jit, static_argnums=(2, 3, 4))
 def getInitialValues(y_t, Xbeta, block_p, block_q, T):
@@ -1163,7 +1291,7 @@ def getInitialValues(y_t, Xbeta, block_p, block_q, T):
 
     return est_beta, est_s2, est_f, est_x0, est_Sigma0, est_A
 
-# %% Utils functions EM
+# %% [Utils] Matrix functions
 
 
 def buildRF(s2error, flatent, pdim, qdim):
@@ -1270,65 +1398,8 @@ def normalize_rows_sparse(sparse_mat):
     normalized = D.dot(sparse_mat)
 
     return normalized
-# fix H row functions
 
-
-def fixH_row(m_points, H, hmeshi, nfIndex, knn=2):
-
-    dist = hmeshi.get_distance(points=m_points)
-
-    if sp.issparse(H):
-        H = H.toarray()
-
-    # iterative solution
-    for i in nfIndex:
-
-        # find the nearest latent points
-        nearest_pt = np.argsort(dist[i, :])[1:knn+1]
-
-        # fix the weight
-        wi = H[i, :].sum()
-
-        H[i, nearest_pt] += (1 - wi)/knn
-
-    return sp.csr_matrix(H)
-
-
-# fix H columns functions
-def fixH_column(m_points, H, hmeshi, thr=1e-1, knn=2):
-
-    dist = hmeshi.get_distance(points=m_points)
-
-    if sp.issparse(H):
-        H = H.toarray()
-
-    # iterative solution
-    while True:
-        inx = np.array(H[:, :hmeshi.n_inner_points].sum(
-            axis=0) <= thr).reshape(-1,)  # of course not the boundary
-
-        fixindex = inx.nonzero()[0]
-        # print(fixindex)
-
-        if len(fixindex) == 0:
-            # return
-            break
-        else:
-            # fix procidure
-            for i in fixindex:
-
-                # find the nearest points
-                nearest_pt = np.argsort(dist[:, i])[1:knn+1]
-
-                # multiplay by 90%
-                H[nearest_pt, :] = H[nearest_pt, :]*0.8
-
-                # add the 0.1 quantity
-                H[nearest_pt, i] = H[nearest_pt, i] + 0.2
-
-    return sp.csr_matrix(H)
-
-# %% mesh helper
+# %% [Utils] Mesh helper
 
 
 def compute_angles(vertex, triangle):
@@ -1390,12 +1461,13 @@ def reduce_vertex_count_hard(vertex, boundary_polygon, max_vertices):
         vertex = tri.points
 
         # Ger the inner vertex (remove the nodes only from the inner vertices)
-        inner_vertex = vertex[isinner(boundary_polygon, vertex)]
+        inner_index = isinner(boundary_polygon, vertex)
+
+        inner_vertex = vertex[inner_index]
 
         # Get the boundary index
-        boundary_index = get_boundary_index(boundary_polygon, vertex)
-        if len(boundary_index) == len(inner_vertex):
-            return Delaunay(vertex)
+        outer_vertex = np.nonzero(~inner_index)[0]
+        # boundary_index = get_boundary_index(boundary_polygon, vertex)
 
         # compute the area and sort
         areas = np.array([compute_area(vertex, t) for t in triangles])
@@ -1409,7 +1481,7 @@ def reduce_vertex_count_hard(vertex, boundary_polygon, max_vertices):
             candidate_vertices = triangles[sort_area_inx[inx]]
 
             for v in candidate_vertices:
-                if v not in boundary_index:
+                if v not in outer_vertex:  # boundary_index:
                     vertex_to_remove = v
                     break
 
@@ -1488,3 +1560,430 @@ def laplacian_smoothing(delaunay, boundary_polygon, max_iterations=10, angle_thr
         vertex = new_points
 
     return vertex, min_angle
+
+
+# %% [Utils] Estimation function
+# used for the comparison and for the case study
+
+def estimate(lowrank, Y_train, Xbeta_train, points_train, tStart, tEnd, model, hull, points_mesh,
+             Y_test, Xbeta_test, points_test, boundary_polygon):
+    max_vertices = [int(np.ceil(lowrank * len(vertex)))
+                    for vertex in points_mesh]  # train
+
+    max_iterations = 2     # Avoid infinite loops laplace algorithm
+    angle_thr = 20         # Angle bounded away from 0 threshold
+
+    # Compute the outer points
+    delta = 0.5
+    x = [np.linspace(start=h.min_bound[0]-delta,
+                     stop=h.max_bound[0]+delta, num=15) for h in hull]
+    y = [np.linspace(start=h.min_bound[1]-delta,
+                     stop=h.max_bound[1]+delta, num=15) for h in hull]
+
+    outer_grid = [np.meshgrid(xi, yi) for xi, yi in zip(x, y)]
+
+    outer_points = [np.vstack(
+        (gr[0].flatten(), gr[1].flatten())).T for gr in outer_grid]  # Mesh vertex grid
+
+    # remove the outer point within the polygon
+    index = [bd_poly.contains([Point(p) for p in ot_points])
+             for bd_poly, ot_points in zip(boundary_polygon, outer_points)]
+    outer_points = [ou_points[~inx]
+                    for ou_points, inx in zip(outer_points, index)]
+
+    # compure the all_points (the inner points index and the boundary coordinates)
+    all_points = [np.vstack((vertex, ou_points))
+                  for vertex, ou_points in zip(points_train, outer_points)]
+    # inner = isinner(boundary_polygon, all_points)  # or contains + polygin
+
+    # Reduce the vertex count and compute a valid delanuay
+    delaunay = [reduce_vertex_count_hard(
+        all_pt, bd_poly, m_v) for all_pt, bd_poly, m_v in zip(all_points, boundary_polygon, max_vertices)]
+
+    # check the beginning min angle
+    min_angle = [np.round(np.min([np.min(compute_angles(d.points, t))
+                                 for t in d.simplices]), 2) for d in delaunay]
+
+    fcov = []
+    for i in range(len(delaunay)):
+
+        new_points, min_angle = laplacian_smoothing(
+            delaunay[i], boundary_polygon[i], max_iterations=max_iterations, angle_thr=angle_thr, )
+
+        # build the covariance mesh
+        inner = isinner(boundary_polygon[i], new_points)
+
+        temp = spdeAppoxCov(new_points, delaunay[i].simplices, outer_index=~inner, add_boundary=True,
+                            latlon=False, uniformRef=False, rescale=10)
+
+        fcov.append(temp)
+
+    # % Estimate the model
+    pdim = jnp.array([len(p) for p in points_train])
+    block_p = jnp.hstack((0, np.cumsum(pdim)))
+    qdim = jnp.array([cov.n_inner_points for cov in fcov])
+    block_q = jnp.hstack((0, np.cumsum(qdim)))
+
+    rxy = 0.9
+    vlat = jnp.array([mdl.var for mdl in model])
+
+    # get some reasonable starting values
+    beta0 = None  # Get by the ols
+    # Initial estimate by semi-variogram (on the mean?)
+    ks0 = jnp.array([np.sqrt(8)/mdl.len_scale for mdl in model])
+    # ks0 = jnp.array([2.67, 2.1])
+
+    A0 = np.array(vlat).reshape((2, 1))  # Initial mean covariance
+    A0 = jnp.diag(vlat)
+    A0 = A0.at[0, 1].set(jnp.sqrt(vlat).prod() * rxy)
+    A0 = A0.at[1, 0].set(A0[0, 1])
+    A0 = jnp.linalg.cholesky(A0).T
+    # A0 = jnp.array([[7.0, 2.5],[3.5, 4]])
+
+    s2e0 = jnp.array([mdl.nugget for mdl in model])  # the residual OLS rmse
+    f0 = jnp.array([0.8, 0.8])  # Random initial guess
+
+    # Estimate the model
+    result = fit(Y_train[:, tStart:tEnd], fcov, block_p, pdim, Xbeta_train[:, :, tStart:tEnd], points_train, beta0=beta0,
+                 s2e0=s2e0, f0=f0, A0=A0, ks0=ks0, x0=None, Sigma0=None, max_iter=100, tol_relat=1e-3, nstat=[], verbose=False)
+
+    if result is None:
+        return None
+
+    est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_covList, est_A, nstat, \
+        y_hat, x_T, P_T, P_T_1, S11, S10, S00 = result
+
+    # df = pd.DataFrame(nstat)
+    est_ks = jnp.array([f.rescale for f in est_covList], dtype=jnp.float32)
+
+    # compute the RMSE (test / train)
+    basis_test = buildBasis_list(points_test, est_covList)
+
+    y_train = Y_train[:, tStart:tEnd]
+    y_test = Y_test[:, tStart:tEnd]
+
+    pdim_test = [len(pt) for pt in points_test]
+    block_p_test = jnp.hstack((0, np.cumsum(pdim_test)))
+
+    # Compute the prections for all varibles
+    Xbeta_train_temp = Xbeta_train[:, :, tStart:tEnd]
+    Xbeta_test_temp = Xbeta_test[:, :, tStart:tEnd]
+
+    Htest = buildH_dense(est_A, basis_test)
+    y_hat_test, Sigma = predict(
+        Htest, x_T, P_T, Xbeta_test_temp, est_beta)
+
+    # computation time
+    iteration = pd.DataFrame(nstat)
+    runtime = iteration.time_tot[1:].sum()
+    runtime_med = iteration.time_tot[1:].median()
+    niter = iteration[-1:].niter.values[0]
+
+    RMSEtrain = []
+    RMSEtest = []
+    for i in range(len(pdim)):
+
+        # In sample RMSE  & residuals
+        res = y_train[block_p[i]:block_p[i+1], :] - \
+            y_hat[block_p[i]:block_p[i+1], :]
+
+        rmse = np.sqrt(np.nanmean(res**2))
+        RMSEtrain.append(rmse)
+
+        # compute the error
+        err = y_test[block_p_test[i]:block_p_test[i+1], :] - \
+            y_hat_test[block_p_test[i]:block_p_test[i+1], :]
+
+        # Compute the test RMSE
+        rmse = np.sqrt(np.nanmean(err**2))
+        RMSEtest.append(rmse)
+
+    output = {
+        'nvar': len(pdim),
+        'nlat': len(fcov),
+        'pdim': pdim,
+        'qdim': qdim,
+        'pdim_test': [len(pt) for pt in points_test],
+        'points_train': points_train,
+        'points_test': points_test,
+        'y_train': Y_train[:, tStart:tEnd],
+        'Xbeta_train': Xbeta_train[:, tStart:tEnd],
+        'y_test': Y_test[:, tStart:tEnd],
+        'lowrank': lowrank,
+        'mesh': fcov,
+        'beta': est_beta,
+        's2e': est_s2e,
+        'f': est_f,
+        'A': est_A,
+        'ks': [f.rescale for f in est_covList],
+        'x0': est_x0,
+        'Sigma0': est_Sigma0,
+        'P_T': P_T,
+        'x_T': x_T,
+        'S00': S00,
+        'S10': S10,
+        'S11': S11,
+        'nstat': nstat,
+        'y_hat': y_hat,
+        'RMSE_train': RMSEtrain,
+        'RMSE_test': RMSEtest,
+        'R2_train': 1 - np.nanvar(res) / np.nanvar(y_train[block_p[i]:block_p[i+1], :]),
+        'R2_test': 1 - np.nanvar(err) / np.nanvar(y_test[block_p_test[i]:block_p_test[i+1], :]),
+        'runtime': runtime,
+        'runtime_med': runtime_med,
+        'emiter': niter
+    }
+
+    return output
+# %% [Utils] Covariates helper function
+
+
+def getLargestPoly(geometry):
+    if isinstance(geometry, Polygon):
+        return geometry
+    elif isinstance(geometry, MultiPolygon):
+        # Return the polygon with the largest area
+        # (itarable, key = scalar ordering function)
+        return max(geometry.geoms, key=lambda p: p.area)
+    else:
+        return geometry  # Just in case
+
+
+def buildObservationGrid(df, formula):
+
+    nvar = len(formula)  # numer of the response variable
+    gridList = [grid(df, f) for f in formula]
+
+    T = [gr.T for gr in gridList]
+    points = [gr.points for gr in gridList]
+
+    # get dimnesion of each grid
+    ndim = [grid.N for grid in gridList]
+    block = np.hstack((0, np.cumsum(ndim)))
+
+    return nvar, points, gridList, ndim, block[-1], block, T
+
+
+@jax.jit
+def block_diag_3D(blocks):
+    """
+    Creates a 3D block diagonal matrix from a list of 3D JAX arrays.
+
+    This function is JIT-compatible. Each input array must be of shape
+    (n_i, m_i, p), where the last dimension `p` is constant.
+
+    Args:
+        blocks: A list of 3D JAX arrays.
+
+    Returns:
+        A single 3D JAX array with the input blocks arranged on the diagonal.
+    """
+    # Guard against an empty list of blocks
+    if not blocks:
+        # Return an empty array. The shape is ambiguous, so a 0-element
+        # array is the most sensible default.
+        return jnp.array([])
+
+    # Determine the total shape for the output matrix
+    total_shape_0 = sum(arr.shape[0] for arr in blocks)
+    total_shape_1 = sum(arr.shape[1] for arr in blocks)
+
+    # The last dimension is constant, take it from the first block
+    p = blocks[0].shape[2]
+
+    # Use jnp.result_type to handle different input dtypes (e.g., int, float32)
+    dtype = jnp.result_type(*blocks)
+
+    # Initialize the block diagonal matrix with zeros
+    out = jnp.zeros((total_shape_0, total_shape_1, p), dtype=dtype)
+
+    # Current start index for the first two dimensions
+    curr_idx_0 = 0
+    curr_idx_1 = 0
+
+    for arr in blocks:
+        n_i, m_i, _ = arr.shape
+
+        # This is the key JAX-native update.
+        # It creates a *new* array `out` by updating the specified slice.
+        # The syntax is designed to look like NumPy but is functionally pure.
+        out = out.at[curr_idx_0: curr_idx_0 + n_i,
+                     curr_idx_1: curr_idx_1 + m_i,
+                     :].set(arr)
+
+        curr_idx_0 += n_i
+        curr_idx_1 += m_i
+
+    return out
+
+# %% Function to evaluate the hessian matrix
+
+
+def loglikelihood(par, stack_dim, basis, y_t, Xbeta, x_T, P_T, S11, S10, S00, x0, Sigma0, pdim, qdim, stiff, mass, ninner):
+    beta0 = par[stack_dim[0]:stack_dim[1]]
+    A0 = par[stack_dim[1]:stack_dim[2]].reshape((2, 2))
+    s2e0 = par[stack_dim[2]:stack_dim[3]]
+    f0 = par[stack_dim[3]:stack_dim[4]]
+    ks0 = par[stack_dim[4]:stack_dim[5]]
+
+    H = buildH_dense(A0, basis)  # dense
+    invR, F = buildRF_dense(1/s2e0, f0, pdim, qdim)
+
+    # get the precision matrix
+    invSigma0 = np.linalg.inv(Sigma0)
+    invQ = compute_invQ_jax(ks0, stiff, mass, ninner)
+
+    Omega = S11 - S10 @ F.T - F @ S10.T + F @ S00 @ F.T
+
+    # compute the observed likelihood
+    logL = compute_logL(y_t, invR, H, invQ, x0, invSigma0,
+                        Xbeta, beta0, x_T, P_T, Omega)
+    jax.block_until_ready(logL)
+
+    return logL
+
+# positive likelihood
+
+
+def compute_logL(y_t, invR, H, invQ, x0, invSigma0, Xbeta, beta, x_T, P_T, Omega):
+    p, T = y_t.shape
+
+    # --- Precompute log-dets ---
+    # logdet_invR = jnp.linalg.slogdet(invR)[1]
+    # logdet_invSigma0 = jnp.linalg.slogdet(invSigma0)[1]
+    logdet_invQ = jnp.linalg.slogdet(invQ)[1]
+
+    # --- Likelihood of yt (sum over t) ---
+    # residual_t = y_t[:, t] - Xbeta[:, :, t] @ beta - H @ x_T[:, t]
+    # Modify to account the missing values
+    lik_yt = compute_logL_yt(y_t, invR, Xbeta, beta, H, x_T, P_T)
+
+    # --- Likelihood of x0 (nuisance paramter -> no needed in the lik. computation)---
+    # diff0 = x_T[:, 0:1] - x0
+    # lik_x0 = -logdet_invSigma0 + \
+    #     jnp.trace(invSigma0 @ (diff0 @ diff0.T + P_T[:, :, 0]))
+
+    # --- Likelihood of xt (sum over t) ---
+    lik_xt = -T * logdet_invQ + jnp.trace(invQ @ Omega)
+
+    return lik_yt + lik_xt
+
+
+@jax.jit
+def compute_logL_yt(y_t, invR, Xbeta, beta, H, x_T, P_T):
+    """
+    Computes the measurement log-likelihood using a JAX scan loop for efficiency.
+    """
+    p, T = y_t.shape
+
+    def _scan_body(carry_log_lik, t):
+        # This function processes a single time step t.
+        # carry_log_lik: The accumulated log-likelihood from previous steps.
+        # t: The current time step index.
+
+        # 1. Get the data slices for the current time step
+        y_slice = y_t[:, t]
+        x_slice = x_T[:, t]
+        P_slice = P_T[:, :, t]
+        Xbeta_slice = Xbeta[:, :, t]
+
+        # 2. Create the mask for observed (non-NaN) data
+        observed_idx = ~jnp.isnan(y_slice)
+
+        # Define the two branches for our conditional execution
+        def true_fun(_):
+            # --- This code runs if AT LEAST ONE value is observed ---
+
+            # Create a diagonal masking matrix from the boolean vector
+            # This is key: it keeps all operations in fixed p x p shape
+            M = jnp.diag(observed_idx.astype(jnp.float32))
+
+            # Mask the inverse covariance of the measurement error
+            # This effectively selects the sub-matrix corresponding to observed data
+            invR_t = M @ invR @ M
+
+            # Calculate the log-determinant of the relevant sub-matrix.
+            # This is tricky. A robust way is to add a large value to the diagonal
+            # for unobserved dimensions, which makes them irrelevant to the determinant.
+            # logdet(inv(A)) = -logdet(A). We have invR. So we need -logdet(R_t)
+            # R_t is the submatrix of R.
+            # A numerically stable way to compute logdet(invR_t) on the fly:
+            logdet_invR_t = jnp.linalg.slogdet(
+                # Use `where` to avoid taking the determinant of a singular matrix
+                # if some values are not observed. Fill with identity.
+                jnp.where(M > 0, invR_t, jnp.eye(p))
+            )[1]
+
+            # Calculate the full-size residual
+            residual_full = y_slice - Xbeta_slice @ beta - H @ x_slice
+            # Mask the residual, setting missing entries to 0 so they don't contribute
+            residual_t = jnp.where(observed_idx, residual_full, 0.0)
+
+            # Calculate the quadratic form using the full-size matrices.
+            # The masking ensures only the correct elements contribute.
+            # residual_t.T @ invR @ residual_t
+            quadratic_form = residual_t.T @ invR @ residual_t
+
+            # Calculate the trace term similarly
+            # H_t @ P_slice @ H_t.T
+            H_t = M @ H
+            trace_term = jnp.trace(H_t @ P_slice @ H_t.T)
+
+            return -logdet_invR_t + quadratic_form + trace_term
+
+        def false_fun(_):
+            # --- This code runs if ALL values are missing ---
+            # The contribution to the log-likelihood is zero.
+            return 0.0
+
+        # 3. Use lax.cond to safely choose which branch to execute
+        # jnp.any(observed_idx) checks if there's at least one `True` value.
+        lik_t = lax.cond(jnp.any(observed_idx), true_fun,
+                         false_fun, operand=None)
+
+        # 4. Update the carry and return it for the next iteration
+        new_carry = carry_log_lik + lik_t
+        # The second element returned is for per-step outputs, which we don't need.
+        return new_carry, None
+
+    # Initial value for the log-likelihood accumulator
+    initial_log_lik = 0.0
+
+    # Run the scan operation over all time steps from 1 to T
+    log_lik_yt, _ = lax.scan(_scan_body, initial_log_lik, jnp.arange(1, T+1))
+
+    return log_lik_yt
+
+
+def compute_invQ_jax(ks, stiff, mass, ninner):
+    invQ = []
+    # Loop over the parameters and matrices. A Python loop is fine here.
+    for i in range(len(ks)):
+        k = ks[i]
+
+        current_mass = mass[i]
+        current_stiff = stiff[i]
+        current_inner = ninner[i]
+
+        Cinv = jnp.diag(1.0 / current_mass.diagonal())
+
+        K = (k**2) * current_mass + current_stiff
+
+        sigma2k = jax.scipy.special.gamma(
+            1.0) / (jax.scipy.special.gamma(2.0) * 4 * jnp.pi * (k**2))
+
+        invQi = sigma2k * (K @ Cinv @ K)
+        # invQi = invQ[:current_inner, :current_inner]
+
+        Q_11 = invQi[:current_inner, :][:, :current_inner]
+        Q_12 = invQi[:current_inner, :][:, current_inner:]
+        Q_22 = invQi[current_inner:, :][:, current_inner:]
+
+        # Covarianza marginale
+        Q_mar_i = Q_11 - \
+            Q_12 @ jnp.linalg.solve(Q_22, jnp.eye(len(Q_22))) @ Q_12.T
+        # Sigma_mar = np.linalg.inv(Q_mar)
+        invQ.append(Q_mar_i)
+
+    # 4. Use `jax.scipy.linalg.block_diag`
+    return block_diag(*invQ)
