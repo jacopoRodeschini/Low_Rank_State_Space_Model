@@ -10,9 +10,11 @@ This paper proposes a novel low-rank approximation to the multivariate State-Spa
 ## Contents
 
 
-* **`main.py`**: Runs the simulation to confirm theoretical findings. Results are saved in the `output/` folder.  
+* **`LRSSM_simulations.py`**: Run the simulations to confirm theoretical findings. Results are saved in the `output/` folder. 
+ 
+* **`LRSSM_case_study.py`**: Run the case study application. Results are saved in the `output/` folder. 
 
-* **`case_study.py`**: Runs the case study application.  
+* **`LRSSM_comparison.py`**: Run the LRSSM for the comparison. Results are saved in the `output/` folder. 
 
 * **`utils/`**: Module containing utility functions.  
 
@@ -22,9 +24,13 @@ This paper proposes a novel low-rank approximation to the multivariate State-Spa
 
 * **`environment.txt`**: List of Python packages required to create the conda environment.  
 
+* **`COMPARISON_INLA.R`**: Run the SSM with INLA for the comparison.
+
+* **`COMPARISON_INLADIFF.R`**: Run the diffuseve model with INLA for the comparison.
 
 
-## Run the simulation and setup Instructions
+
+## Setup the environment
 
 1. **Download the repository** as a ZIP file named `Low_Rank_State_Space_Model.zip`, and extract it into a folder named `Low_Rank_State_Space_Model`.
 
@@ -46,10 +52,18 @@ conda create --name dev --file environment.txt
 conda activate dev
 ```
 
-5. **Run the `main.py` script**:
+## Run the simulations
+
+1. **Activate the environment**:
 
 ```bash
-python main.py
+conda activate dev
+```
+
+2. **Run the `LRSSM_simulations.py` script**:
+
+```bash
+python LRSSM_simulations.py
 ```
 
 ## Run the Case Study Application (AQCLIM_GRINS Dataset)
@@ -62,10 +76,36 @@ python main.py
 conda activate dev
 ```
 
-3. **Run the case study** using the Python script. The script requires the **low-rank parameter** as a command-line argument (e.g., `0.75`):
+3. **Run the case study** using the Python script:
 
 ```bash
-python case_study.py 0.75
+python LRSSM_case_study.py 
+```
+
+## Run the comparison script 
+
+1. **Activate the environment**:
+
+```bash
+conda activate dev
+```
+
+```bash
+python LRSSM_comparison.py
+```
+
+2. **Run the `COMPARISON_INLA.R` script**:
+
+```bash
+Rscript COMPARISON_INLA.R
+
+```
+
+3. **Run the `COMPARISON_INLADIFF.R` script**
+
+```bash
+Rscript COMPARISON_INLADIFF.R
+
 ```
 
 ---
