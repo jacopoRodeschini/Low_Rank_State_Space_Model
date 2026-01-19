@@ -1570,8 +1570,8 @@ def estimate(lowrank, Y_train, Xbeta_train, points_train, tStart, tEnd, model, h
     max_vertices = [int(np.ceil(lowrank * len(vertex)))
                     for vertex in points_mesh]  # train
 
-    max_iterations = 2     # Avoid infinite loops laplace algorithm
-    angle_thr = 20         # Angle bounded away from 0 threshold
+    max_iterations = 5     # Avoid infinite loops laplace algorithm
+    angle_thr = 10         # Angle bounded away from 0 threshold
 
     # Compute the outer points
     delta = 0.5
